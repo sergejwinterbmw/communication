@@ -28,6 +28,7 @@ exposed to local clients via `score::message_passing`. Not part of the product.
 | `@lg_someip//:someipd` | Upstream lg-someip routing daemon, required by `test:someip_sd_peer` |
 | `test:someip_sd_dual_qemu_test` | Integration test on two QNX QEMU VMs (see below) |
 | `test:someip_sd_docker_test` | Same integration test on two Linux Docker containers |
+| `iosock_poc:iosock_poc_test` | QNX only: LoLa and `score::message_passing` inside an io-sock module (see below) |
 
 ## Prototyp target architecture overview
 ![Architecture diagram](doc/prototype.svg)
@@ -161,6 +162,50 @@ client unsubscribed (`--runtime`).
   `.bazelrc`.
 - Linux: the ITF Docker container plus a second container started by the test, both attached to a bridge network
   with subnet 10.0.3.0/24 (must not be in use on the host).
+
+## io-sock module feasibility check
+
+[iosock_poc](iosock_poc) checks whether the event module can run inside io-sock with LoLa and
+`score::message_passing`, before the event module is ported:
+
+```sh
+bazel test --config=qnx_x86_64 //experimental/someip_sd/iosock_poc:iosock_poc_test
+```
+
+- `mods-iosock-poc.so` consists of the FreeBSD module glue ([module/io_sock_module.c](iosock_poc/module/io_sock_module.c),
+  compiled against the SDP's `usr/include/devs` headers with the flags of `mods.mk`, see
+  [iosock_module.bzl](iosock_poc/iosock_module.bzl)) and a C++ part ([module/poc_plugin.cpp](iosock_poc/module/poc_plugin.cpp))
+  that only uses QNX / POSIX APIs. On `MOD_LOAD` it starts a regular thread that initializes the mw::com runtime,
+  starts a `message_passing` server (reply = request + 1) and offers a LoLa `GenericSkeleton` sending a counter.
+  The glue also opens a kernel UDP socket (`socreate`, port 30700) served by a kthread: every datagram
+  (`soreceive`) is copied into an allocated LoLa slot. Its payload is attached directly to an mbuf with
+  `MEXTADD` and echoed with `sosend`, without a TX `uio` copy. An opaque context owns the `SampleAllocateePtr`
+  until the mbuf's external-storage free callback publishes the sample via LoLa. Shutdown waits for pending
+  TX contexts before destroying the skeleton.
+- The test loads it with `mount -T io-sock`, then a regular process ([consumer/consumer.cpp](iosock_poc/consumer/consumer.cpp))
+  sends a request via `message_passing`, receives the LoLa counter, sends 5 UDP datagrams to the module and expects
+  the echoes as well as the datagrams via LoLa, checking their contents.
+- For application TX, the same process offers a separate LoLa skeleton (`iosock/tx`). The module discovers it
+  and subscribes through a `GenericProxy`. The kernel thread takes a sample, attaches its payload to an mbuf
+  with `MEXTADD` and sends it to the fixed loopback UDP port 30701. The mbuf context holds the received
+  `SamplePtr<void>` until the free callback destroys it; no payload copy is made between LoLa and `sosend`.
+  The test sends 10 different payloads through 5 sample slots and verifies every UDP payload, exercising slot reuse.
+  This is a transport feasibility test, not SOME/IP framing or SD-driven remote subscriber routing.
+- Result in QEMU: all of it works. The worker runs in the io-sock process after io-sock dropped to uid 33; LoLa
+  `Allocate` / `Send` can be called from the kthread.
+- Findings:
+  - io-sock resolves the module's symbols itself; `cc_shared_library` drops the `-lfsnotify` linkopt of baselibs,
+    so it is added explicitly (otherwise `inotify_*` are unresolved and loading fails with `Exec format error`).
+  - The QNX SDK only forward-declares `struct uio`; the glue mirrors the FreeBSD 13.5 definition for
+    `soreceive` / `sosend` with kernel buffers.
+  - A `GenericProxy` that outlives `main()` aborts the consumer on exit (rc 134); it must be destroyed before the
+    static mw::com runtime objects.
+  - `MEXTADD` on ordinary LoLa shared memory works in the QEMU loopback test. This does not establish DMA
+    suitability or absence of copies inside the network stack or driver. The free callback signals the end of
+    the mbuf reference lifetime, not necessarily hardware transmission completion.
+  - Not covered yet: physical NIC transmission, unloading the module and whether the public QNX SDP contains
+    `usr/include/devs` (the local setup uses the
+    safe-posix-platform SDP). Real-target secpol checks are deferred.
 
 ## Configuration
 
