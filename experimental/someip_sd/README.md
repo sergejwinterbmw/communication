@@ -29,6 +29,9 @@ exposed to local clients via `score::message_passing`. Not part of the product.
 | `test:someip_sd_dual_qemu_test` | Integration test on two QNX QEMU VMs (see below) |
 | `test:someip_sd_docker_test` | Same integration test on two Linux Docker containers |
 
+## Prototyp target architecture overview
+![Architecture diagram](doc/prototype.svg)
+
 ## Architecture (stage 2)
 
 ```mermaid
