@@ -65,6 +65,65 @@ flowchart LR
   [protocol/sd_protocol.h](protocol/sd_protocol.h); each connection gets a client id that is used as lg-someip
   application id.
 
+### Daemon internals
+
+```mermaid
+flowchart LR
+    client(["Clients<br/>(score::message_passing)"])
+
+    subgraph daemon["someip_sd_daemon"]
+        direction LR
+        facade["SdFacade<br/>message_passing server,<br/>per-client state<br/>(available, subscriptions)"]
+        sm["lg-someip ServiceManager<br/>SD state machine"]
+        router["SdOnlyRouter<br/>implements lgsomeip::ServiceRouter<br/>multiplexer thread, task queue,<br/>timers, SD UDP endpoints"]
+    end
+
+    net(["Network<br/>SD UDP 30491"])
+
+    client -- "Register / RequestService / Subscribe ..." --> facade
+    facade -- "Availability / SubscriptionState (Notify)" --> client
+
+    facade -- "Post(task): work runs on the multiplexer thread" --> router
+    facade -- "on_internal_message(MessageSD)<br/>FindService / Subscribe, TTL 0 = release / unsubscribe<br/>on_disconnected_application(client_id)" --> sm
+
+    router -- "SetInternalMessageHandler callback<br/>(client_id, SD bytes: Offer / SubscribeAck)" --> facade
+
+    router -- "on_external_message(endpoint, MessageSD, reboot)" --> sm
+    sm -- "ServiceRouter API (see table)" --> router
+
+    router <-- "SD multicast + unicast" --> net
+```
+
+`ServiceManager` → `SdOnlyRouter` (`lgsomeip::ServiceRouter`):
+
+| Group | Calls | `SdOnlyRouter` |
+| --- | --- | --- |
+| Lifecycle | `init`, `start`, `stop` | Sets up the network device, multiplexer, task pipe and SD sockets; starts/stops the multiplexer |
+| Infrastructure | `get_multiplexer`, `get_service_discovery_{multicast,unicast}_endpoint`, `make_address` | Returns its own objects |
+| Timers (QNX) | `message_passing_set_timer`, `message_passing_kill_timer` | One thread per timer; the handler runs on the multiplexer thread via `Post` |
+| SD output | `send_external_sd_message` | Sends via the unicast endpoint (to the target address or the multicast group) |
+| | `send_internal_message` | Passed to the `InternalMessageHandler`, i.e. to `SdFacade` |
+| Data routing | `add_route`, `remove_route`, `find_connection` | Logged only; `find_connection` always returns 1 |
+| | `add_subscribe_route`, `remove_subscribe_route` | Logged only; hook for the event module |
+| Other | `set_instance_id`, `check_and_send_magic_cookies`, `reboot_route` | No-op / logged |
+
+Calls into `ServiceManager`:
+
+| Caller | Call | Purpose |
+| --- | --- | --- |
+| `SdOnlyRouter` | `on_external_message(endpoint, sd, reboot)` | SD message received from the network, filtered (own sender, port) and checked for reboot |
+| `SdFacade` | `on_internal_message(sd)` | Client request as internal SD message; the client id is put into the client part of the request id |
+| `SdFacade` | `on_disconnected_application(client_id)` | Cleanup after a client disconnected |
+| `main` | constructor `(name, config, router)`, `init`, `start`, `stop`, `get_configuration` | Lifecycle |
+
+Threading:
+
+- `SdFacade`'s message_passing callbacks never call the `ServiceManager` directly but `Post` to the multiplexer
+  thread, so all `ServiceManager` calls are serialized there, like in lg-someip's own daemon.
+- `send_internal_message` is called synchronously from within the `ServiceManager`; `SdFacade` posts it again, so
+  `HandleServiceManagerMessage` does not run re-entrantly inside the `ServiceManager`.
+- Exception: the `ServiceManager` calls `add_route` from its own worker thread (`SomeipSvcConn`).
+
 ## Integration tests
 
 ```sh
