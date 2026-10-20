@@ -1,0 +1,47 @@
+{
+  "serviceTypes": [
+    {
+      "serviceTypeName": "/someip/1234",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "bindings": [
+        {
+          "binding": "SHM",
+          "serviceId": 4660,
+          "events": [
+            {
+              "eventName": "event_8778",
+              "eventId": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "serviceInstances": [
+    {
+      "instanceSpecifier": "someip/1234/5678",
+      "serviceTypeName": "/someip/1234",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "instances": [
+        {
+          "instanceId": 22136,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "event_8778",
+              "numberOfSampleSlots": 10,
+              "maxSubscribers": 3
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

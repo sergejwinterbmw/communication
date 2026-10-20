@@ -21,6 +21,8 @@
 #include <sys/eventfd.h>
 #endif
 
+#include "experimental/someip_sd/daemon/event_module_client.h"
+
 #include "endpoint/Endpoint.h"
 #include "multiplex/Multiplexer.h"
 #include "packetrouter/ServiceRouter.h"
@@ -43,9 +45,8 @@ namespace score::someip_sd
 
 /// ServiceRouter for lg-someip's ServiceManager that only handles SOME/IP-SD traffic.
 ///
-/// Owns the SD multicast / unicast UDP endpoints and the multiplexer thread. All routing callbacks for
-/// SOME/IP data (add_route, add_subscribe_route, ...) are only logged; they are the hook for the future
-/// io-sock event module.
+/// Owns the SD multicast / unicast UDP endpoints and the multiplexer thread. The routing callbacks for
+/// SOME/IP data (add_route, add_subscribe_route, ...) are forwarded to the event module, if one is set.
 class SdOnlyRouter final : public lgsomeip::ServiceRouter
 {
   public:
@@ -61,6 +62,9 @@ class SdOnlyRouter final : public lgsomeip::ServiceRouter
     SdOnlyRouter& operator=(SdOnlyRouter&&) = delete;
 
     void SetServiceManager(lgsomeip::ServiceManager* service_manager);
+
+    /// Optional; without event module the routing callbacks are only logged.
+    void SetEventModule(EventModuleClient* event_module);
 
     /// Receives the SD messages the ServiceManager sends to local applications (offers, subscribe acks).
     /// May be called from any thread.
@@ -148,7 +152,10 @@ class SdOnlyRouter final : public lgsomeip::ServiceRouter
     bool IsReboot(const std::shared_ptr<lgsomeip::Endpoint>& endpoint, bool reboot_flag, std::uint32_t request_id);
     void RunPostedTasks();
 
+    void ForwardToEventModule(const event_module_protocol::Message& message);
+
     lgsomeip::ServiceManager* service_manager_{nullptr};
+    EventModuleClient* event_module_{nullptr};
     std::shared_ptr<lgsomeip::osabstraction::Multiplexer> multiplexer_;
     std::shared_ptr<lgsomeip::osabstraction::Address> multicast_address_;
     std::shared_ptr<lgsomeip::Endpoint> multicast_endpoint_;

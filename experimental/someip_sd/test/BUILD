@@ -17,8 +17,9 @@ load("//quality/integration_testing:integration_testing.bzl", "dual_qemu_integra
 load("//score/mw:common_features.bzl", "COMPILER_WARNING_FEATURES")
 load("//score/mw/com/test:pkg_application.bzl", "pkg_application")
 
-# Integration tests: the SD side (10.0.3.1, SD daemon + test client) and the peer side (10.0.3.2, lg-someip someipd +
-# provider) run the same scenario (someip_sd_scenario.py) on two QNX QEMU VMs or two Linux Docker containers.
+# Integration tests: the SD side (10.0.3.1, event module + SD daemon + test client) and the peer side (10.0.3.2,
+# lg-someip someipd + provider) run the same scenario (someip_sd_scenario.py) on two QNX QEMU VMs or two Linux Docker
+# containers.
 
 # Remote provider on the upstream lg-someip stack; needs @lg_someip//:someipd running alongside.
 cc_binary(
@@ -37,10 +38,15 @@ pkg_application(
     name = "sd_apps",
     app_name = "someip_sd",
     bin = [
+        "//experimental/someip_sd:someip_event_module",
         "//experimental/someip_sd:someip_sd_daemon",
         "//experimental/someip_sd:someip_sd_test_client",
     ],
-    etc = ["config/sd_daemon.json"],
+    etc = [
+        "config/logging.json",
+        "config/mw_com_config.json",
+        "config/sd_daemon.json",
+    ],
 )
 
 pkg_application(

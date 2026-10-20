@@ -151,7 +151,8 @@ bazel test --config=qnx_x86_64 //experimental/someip_sd/test:someip_sd_dual_qemu
 Both run the scenario in [test/someip_sd_scenario.py](test/someip_sd_scenario.py) with the configs in
 [test/config](test/config): the SD side (10.0.3.1) runs `someip_event_module`, `someip_sd_daemon` and the test client,
 the peer side (10.0.3.2) runs `someipd` and `someip_sd_peer`. The test checks availability, subscription
-acknowledgement, the LoLa offer of the event module and the events received via LoLa.
+acknowledgement, the LoLa offer of the event module, the events received via LoLa and that no events arrive after the
+client unsubscribed (`--runtime`).
 
 - QNX: `dual_qemu` environment with the inter-VM network. Requires the QNX toolchain setup described in the root
   `.bazelrc`.
@@ -202,3 +203,5 @@ machine in the same subnet; start `someipd` first, the provider registers with i
 
 Expected test client output: the service becomes available, the subscription is acknowledged, the LoLa service
 `someip/1234/5678` is found and event `0x8778` arrives every second via LoLa with an incrementing counter as payload.
+With `--runtime <seconds>` the client unsubscribes afterwards, checks for 3 s that no further events arrive
+(`result: OK, no events after unsubscribe`) and exits with 0; without it, it runs until SIGINT/SIGTERM.

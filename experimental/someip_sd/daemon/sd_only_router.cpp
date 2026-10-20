@@ -12,6 +12,8 @@
  ********************************************************************************/
 #include "experimental/someip_sd/daemon/sd_only_router.h"
 
+#include "config/Configuration.h"
+#include "config/ServiceInfo.h"
 #include "message/MessageBuilder.h"
 #include "message/MessageSD.h"
 #include "socket/IP4Address.h"
@@ -26,6 +28,7 @@
 #include <array>
 #include <chrono>
 #include <exception>
+#include <sstream>
 #include <stdexcept>
 
 namespace score::someip_sd
@@ -37,6 +40,27 @@ namespace
 std::string ToString(const std::shared_ptr<lgsomeip::osabstraction::Address>& address)
 {
     return (address != nullptr) ? address->to_string() : std::string{"-"};
+}
+
+/// Returns false for anything but a dotted IPv4 address; IPv6 is not supported by the PoC event module.
+bool ParseIpv4(const std::string& text, std::array<std::uint8_t, 4U>& bytes)
+{
+    std::istringstream stream{text};
+    for (std::size_t index = 0U; index < bytes.size(); ++index)
+    {
+        unsigned int value{0U};
+        char separator{'.'};
+        if ((index > 0U) && (!(stream >> separator) || (separator != '.')))
+        {
+            return false;
+        }
+        if (!(stream >> value) || (value > 255U))
+        {
+            return false;
+        }
+        bytes[index] = static_cast<std::uint8_t>(value);
+    }
+    return stream.peek() == std::char_traits<char>::eof();
 }
 
 }  // namespace
@@ -64,6 +88,20 @@ SdOnlyRouter::~SdOnlyRouter()
 void SdOnlyRouter::SetServiceManager(lgsomeip::ServiceManager* service_manager)
 {
     service_manager_ = service_manager;
+}
+
+void SdOnlyRouter::SetEventModule(EventModuleClient* event_module)
+{
+    event_module_ = event_module;
+}
+
+void SdOnlyRouter::ForwardToEventModule(const event_module_protocol::Message& message)
+{
+    if ((event_module_ != nullptr) && (!event_module_->Send(message)))
+    {
+        LGSOMEIP_LOG_WARN << "SdOnlyRouter: event module not reachable, routing command 0x" << std::hex
+                          << static_cast<std::uint32_t>(message.opcode) << " dropped" << std::dec;
+    }
 }
 
 void SdOnlyRouter::SetInternalMessageHandler(InternalMessageHandler handler)
@@ -383,20 +421,47 @@ bool SdOnlyRouter::add_route(std::uint16_t service_id,
     LGSOMEIP_LOG_INFO << "SdOnlyRouter: add_route " << std::hex << service_id << "." << instance_id
                       << " app=" << app_id << std::dec << " remote tcp=" << ToString(remote_tcp_address)
                       << " udp=" << ToString(remote_udp_address) << " local tcp port=" << local_tcp_port
-                      << " udp port=" << local_udp_port << " (no event module, accepted)";
+                      << " udp port=" << local_udp_port;
+
+    event_module_protocol::Message message{};
+    message.opcode = event_module_protocol::Opcode::kAddRoute;
+    message.service = service_id;
+    message.instance = instance_id;
+    message.local_port = local_udp_port;
+    if ((remote_udp_address == nullptr) || (!ParseIpv4(remote_udp_address->get_ip_address(), message.remote_ip)))
+    {
+        LGSOMEIP_LOG_WARN << "SdOnlyRouter: no IPv4 UDP endpoint, route not forwarded to the event module";
+        return true;
+    }
+    message.remote_port = remote_udp_address->get_port_address();
+    auto* service_info = service_manager_->get_configuration()->get_service_info(service_id, instance_id);
+    if (service_info != nullptr)
+    {
+        for (const auto& event : *service_info->get_events())
+        {
+            message.events.push_back(event.first);
+        }
+    }
+    ForwardToEventModule(message);
     return true;
 }
 
 void SdOnlyRouter::remove_route(std::uint16_t service_id, std::uint16_t instance_id)
 {
     LGSOMEIP_LOG_INFO << "SdOnlyRouter: remove_route " << std::hex << service_id << "." << instance_id;
+
+    event_module_protocol::Message message{};
+    message.opcode = event_module_protocol::Opcode::kRemoveRoute;
+    message.service = service_id;
+    message.instance = instance_id;
+    ForwardToEventModule(message);
 }
 
 std::int32_t SdOnlyRouter::find_connection(std::uint16_t,
                                            std::uint16_t,
                                            std::shared_ptr<lgsomeip::osabstraction::Address>)
 {
-    // TCP connections are owned by the future event module; report them as present.
+    // TCP connections are owned by the event module (not supported yet); report them as present.
     return 1;
 }
 
@@ -410,6 +475,18 @@ void SdOnlyRouter::add_subscribe_route(std::uint16_t service_id,
     LGSOMEIP_LOG_INFO << "SdOnlyRouter: add_subscribe_route " << std::hex << service_id << "." << instance_id
                       << " eventgroup=" << event_group_id << " event=" << event_id << " app=" << app_id << std::dec
                       << " address=" << ToString(address);
+
+    // Only subscriptions of local clients are routed; multicast eventgroups are not supported yet.
+    if ((app_id == 0U) || (address != nullptr))
+    {
+        return;
+    }
+    event_module_protocol::Message message{};
+    message.opcode = event_module_protocol::Opcode::kAddSubscription;
+    message.service = service_id;
+    message.instance = instance_id;
+    message.event = event_id;
+    ForwardToEventModule(message);
 }
 
 void SdOnlyRouter::remove_subscribe_route(std::uint16_t service_id,
@@ -420,6 +497,17 @@ void SdOnlyRouter::remove_subscribe_route(std::uint16_t service_id,
 {
     LGSOMEIP_LOG_INFO << "SdOnlyRouter: remove_subscribe_route " << std::hex << service_id << "." << instance_id
                       << " event=" << event_id << " app=" << app_id << std::dec << " address=" << ToString(address);
+
+    if (app_id == 0U)
+    {
+        return;
+    }
+    event_module_protocol::Message message{};
+    message.opcode = event_module_protocol::Opcode::kRemoveSubscription;
+    message.service = service_id;
+    message.instance = instance_id;
+    message.event = event_id;
+    ForwardToEventModule(message);
 }
 
 void SdOnlyRouter::remove_subscribe_route(std::uint16_t service_id,

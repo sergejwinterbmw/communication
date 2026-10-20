@@ -25,13 +25,18 @@ _LINUX_OR_QNX = select({
 
 cc_library(
     name = "sd_protocol",
-    hdrs = ["protocol/sd_protocol.h"],
+    hdrs = [
+        "protocol/event_module_protocol.h",
+        "protocol/sd_protocol.h",
+    ],
     features = COMPILER_WARNING_FEATURES,
 )
 
 cc_binary(
     name = "someip_sd_daemon",
     srcs = [
+        "daemon/event_module_client.cpp",
+        "daemon/event_module_client.h",
         "daemon/main.cpp",
         "daemon/sd_facade.cpp",
         "daemon/sd_facade.h",
@@ -45,6 +50,28 @@ cc_binary(
         ":sd_protocol",
         "//score/message_passing",
         "@lg_someip//:daemon_core",
+    ],
+)
+
+# User-space stand-in for the io-sock event module: SOME/IP notifications (UDP) -> LoLa events.
+cc_binary(
+    name = "someip_event_module",
+    srcs = [
+        "event_module/event_module.cpp",
+        "event_module/event_module.h",
+        "event_module/main.cpp",
+    ],
+    features = COMPILER_WARNING_FEATURES,
+    linkopts = select({
+        "@platforms//os:qnx": ["-lsocket"],
+        "//conditions:default": [],
+    }),
+    target_compatible_with = _LINUX_OR_QNX,
+    visibility = ["//experimental/someip_sd/test:__pkg__"],
+    deps = [
+        ":sd_protocol",
+        "//score/message_passing",
+        "//score/mw/com",
     ],
 )
 
@@ -63,11 +90,11 @@ cc_binary(
     name = "someip_sd_test_client",
     srcs = ["client/test_client.cpp"],
     features = COMPILER_WARNING_FEATURES,
-    linkopts = select({
-        "@platforms//os:qnx": ["-lsocket"],
-        "//conditions:default": [],
-    }),
     target_compatible_with = _LINUX_OR_QNX,
     visibility = ["//experimental/someip_sd/test:__pkg__"],
-    deps = [":sd_client"],
+    deps = [
+        ":sd_client",
+        ":sd_protocol",
+        "//score/mw/com",
+    ],
 )

@@ -88,7 +88,7 @@ int main(int argc, char** argv)
                                                  static_cast<std::uint8_t>(counter >> 8U),
                                                  static_cast<std::uint8_t>(counter)};
             application->notify(kService, kInstance, kEvent, payload);
-            std::cout << "notified counter " << counter << std::endl;
+            std::cout << "[SomeIP Peer Provider] notified counter " << counter << std::endl;
             ++counter;
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
