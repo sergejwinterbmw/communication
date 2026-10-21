@@ -104,6 +104,25 @@ void SdOnlyRouter::ForwardToEventModule(const event_module_protocol::Message& me
     }
 }
 
+bool SdOnlyRouter::MakeRemoteSubscriberMessage(std::uint16_t service_id,
+                                               std::uint16_t instance_id,
+                                               std::uint16_t event_id,
+                                               const std::shared_ptr<lgsomeip::osabstraction::Address>& address,
+                                               event_module_protocol::Message& message)
+{
+    if (address->get_reliable() || (!ParseIpv4(address->get_ip_address(), message.remote_ip)))
+    {
+        LGSOMEIP_LOG_WARN << "SdOnlyRouter: remote subscriber " << ToString(address)
+                          << " is not IPv4 UDP, not forwarded to the event module";
+        return false;
+    }
+    message.service = service_id;
+    message.instance = instance_id;
+    message.event = event_id;
+    message.remote_port = address->get_port_address();
+    return true;
+}
+
 void SdOnlyRouter::SetInternalMessageHandler(InternalMessageHandler handler)
 {
     std::lock_guard<std::mutex> lock{handler_mutex_};
@@ -428,12 +447,6 @@ bool SdOnlyRouter::add_route(std::uint16_t service_id,
     message.service = service_id;
     message.instance = instance_id;
     message.local_port = local_udp_port;
-    if ((remote_udp_address == nullptr) || (!ParseIpv4(remote_udp_address->get_ip_address(), message.remote_ip)))
-    {
-        LGSOMEIP_LOG_WARN << "SdOnlyRouter: no IPv4 UDP endpoint, route not forwarded to the event module";
-        return true;
-    }
-    message.remote_port = remote_udp_address->get_port_address();
     auto* service_info = service_manager_->get_configuration()->get_service_info(service_id, instance_id);
     if (service_info != nullptr)
     {
@@ -442,6 +455,36 @@ bool SdOnlyRouter::add_route(std::uint16_t service_id,
             message.events.push_back(event.first);
         }
     }
+
+    // A local application offers the service; the remote addresses are our own configured endpoints then.
+    if (app_id != 0U)
+    {
+        if ((service_info == nullptr) || (local_udp_port == 0U))
+        {
+            LGSOMEIP_LOG_WARN << "SdOnlyRouter: provided service without configured UDP port, not forwarded";
+            return true;
+        }
+        message.opcode = event_module_protocol::Opcode::kAddProvidedService;
+        message.major = service_info->get_major_version();
+        for (const auto event : message.events)
+        {
+            const auto* const event_config = service_info->get_event(event);
+            if ((event_config != nullptr) && event_config->is_field())
+            {
+                message.fields.push_back(event);
+            }
+        }
+        ForwardToEventModule(message);
+        return true;
+    }
+
+    if ((remote_udp_address == nullptr) || (!ParseIpv4(remote_udp_address->get_ip_address(), message.remote_ip)))
+    {
+        LGSOMEIP_LOG_WARN << "SdOnlyRouter: no IPv4 UDP endpoint, route not forwarded to the event module";
+        return true; // return false?
+    }
+    message.remote_port = remote_udp_address->get_port_address();
+    // default case: service offered on someip
     ForwardToEventModule(message);
     return true;
 }
@@ -476,17 +519,27 @@ void SdOnlyRouter::add_subscribe_route(std::uint16_t service_id,
                       << " eventgroup=" << event_group_id << " event=" << event_id << " app=" << app_id << std::dec
                       << " address=" << ToString(address);
 
-    // Only subscriptions of local clients are routed; multicast eventgroups are not supported yet.
-    if ((app_id == 0U) || (address != nullptr))
+    // Local client subscribed a remote service; multicast eventgroups (app_id and address set) are not supported yet.
+    if ((app_id != 0U) && (address == nullptr))
     {
+        event_module_protocol::Message message{};
+        message.opcode = event_module_protocol::Opcode::kAddSubscription; // TODO: rename to kAddLocalSubscription?
+        message.service = service_id;
+        message.instance = instance_id;
+        message.event = event_id;
+        ForwardToEventModule(message);
         return;
     }
-    event_module_protocol::Message message{};
-    message.opcode = event_module_protocol::Opcode::kAddSubscription;
-    message.service = service_id;
-    message.instance = instance_id;
-    message.event = event_id;
-    ForwardToEventModule(message);
+    // Remote client subscribed a provided service; called again on every renewal.
+    if ((app_id == 0U) && (address != nullptr))
+    {
+        event_module_protocol::Message message{};
+        message.opcode = event_module_protocol::Opcode::kAddRemoteSubscriber;
+        if (MakeRemoteSubscriberMessage(service_id, instance_id, event_id, address, message))
+        {
+            ForwardToEventModule(message);
+        }
+    }
 }
 
 void SdOnlyRouter::remove_subscribe_route(std::uint16_t service_id,
@@ -500,6 +553,12 @@ void SdOnlyRouter::remove_subscribe_route(std::uint16_t service_id,
 
     if (app_id == 0U)
     {
+        event_module_protocol::Message message{};
+        message.opcode = event_module_protocol::Opcode::kRemoveRemoteSubscriber;
+        if ((address != nullptr) && MakeRemoteSubscriberMessage(service_id, instance_id, event_id, address, message))
+        {
+            ForwardToEventModule(message);
+        }
         return;
     }
     event_module_protocol::Message message{};

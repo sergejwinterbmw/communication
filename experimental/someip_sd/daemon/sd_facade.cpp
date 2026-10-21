@@ -220,6 +220,26 @@ void SdFacade::HandleClientMessage(std::uint16_t client_id, const protocol::Mess
             }
             break;
         }
+        case protocol::Opcode::kOfferService:
+            if (client.offered.count(key) == 0U)
+            {
+                client.offered[key] = std::make_pair(message.major, message.minor);
+                SendOfferService(client_id, key, message.major, message.minor, lgsomeip::SOMEIP_DEFAULT_TTL_ON);
+            }
+            break;
+        case protocol::Opcode::kStopOfferService:
+        {
+            const auto found = client.offered.find(key);
+            if (found != client.offered.end())
+            {
+                // rename to StopOfferService to avoid confusion
+                SendOfferService(
+                    client_id, key, found->second.first, found->second.second, lgsomeip::SOMEIP_DEFAULT_TTL_OFF);
+                client.offered.erase(found);
+            }
+            // TODO: error handling? stopping a service that was not offered by the client...
+            break;
+        }
         case protocol::Opcode::kRegister:
         case protocol::Opcode::kAvailability:
         case protocol::Opcode::kSubscriptionState:
@@ -302,6 +322,14 @@ void SdFacade::HandleServiceManagerMessage(std::uint16_t client_id, std::vector<
                 notification.flag = (entry.get_ttl() != lgsomeip::SOMEIP_DEFAULT_TTL_OFF) ? 1U : 0U;
                 Notify(client_id, notification);
                 break;
+            case lgsomeip::SOMEIP_SD_ENTRY::SUBSCRIBE::TYPEID:
+                // A (remote) subscriber of a service offered by this client; accepted on the client's behalf.
+                if ((client.offered.count(key) != 0U) && (entry.get_ttl() != lgsomeip::SOMEIP_DEFAULT_TTL_OFF))
+                {
+                    SendSubscribeAck(
+                        client_id, key, entry.get_event_group_id(), entry.get_major_version(), entry.get_ttl());
+                }
+                break;
             default:
                 break;
         }
@@ -311,6 +339,16 @@ void SdFacade::HandleServiceManagerMessage(std::uint16_t client_id, std::vector<
 void SdFacade::HandleClientDisconnect(std::uint16_t client_id)
 {
     LGSOMEIP_LOG_INFO << "SdFacade: client 0x" << std::hex << client_id << std::dec << " disconnected";
+    const auto found = clients_.find(client_id);
+    if (found != clients_.end())
+    {
+        // The ServiceManager does not remove the routes of a disconnected provider, a StopOffer does.
+        for (const auto& offer : found->second.offered)
+        {
+            SendOfferService(
+                client_id, offer.first, offer.second.first, offer.second.second, lgsomeip::SOMEIP_DEFAULT_TTL_OFF);
+        }
+    }
     clients_.erase(client_id);
     try
     {
@@ -363,6 +401,59 @@ void SdFacade::SendSubscribe(std::uint16_t client_id, const Subscription& subscr
     catch (const std::exception& exception)
     {
         LGSOMEIP_LOG_ERROR << "SdFacade: subscribe failed: " << exception.what();
+    }
+}
+
+void SdFacade::SendOfferService(std::uint16_t client_id,
+                                const ServiceKey& key,
+                                std::uint8_t major,
+                                std::uint32_t minor,
+                                std::uint32_t ttl)
+{
+    auto sd_message = CreateInternalMessage(client_id);
+    lgsomeip::SDEntry entry{lgsomeip::SOMEIP_SD_ENTRY::OFFERSERVICE::TYPEID};
+    entry.set_service_id(key.first);
+    entry.set_instance_id(key.second);
+    entry.set_major_version(major);
+    entry.set_minor_version(minor);
+    entry.set_ttl(ttl);
+    // TODO; add_entry return value? why is this needed?
+    lgsomeip::MessageComposer::add_entry(sd_message, &entry, nullptr);
+
+    try
+    {
+        service_manager_.on_internal_message(sd_message);
+    }
+    catch (const std::exception& exception)
+    {
+        LGSOMEIP_LOG_ERROR << "SdFacade: offer service failed: " << exception.what();
+    }
+}
+
+void SdFacade::SendSubscribeAck(std::uint16_t client_id,
+                                const ServiceKey& key,
+                                std::uint16_t eventgroup,
+                                std::uint8_t major,
+                                std::uint32_t ttl)
+{
+    auto sd_message = CreateInternalMessage(client_id);
+    sd_message->set_flag(kSubscribeMessageFlags);
+    lgsomeip::SDEntry entry{lgsomeip::SOMEIP_SD_ENTRY::SUBSCRIBEACK::TYPEID};
+    entry.set_service_id(key.first);
+    entry.set_instance_id(key.second);
+    entry.set_major_version(major);
+    entry.set_event_group_id(eventgroup);
+    entry.set_ttl(ttl);
+    entry.set_flag(0x00U);
+    lgsomeip::MessageComposer::add_entry(sd_message, &entry, nullptr);
+
+    try
+    {
+        service_manager_.on_internal_message(sd_message);
+    }
+    catch (const std::exception& exception)
+    {
+        LGSOMEIP_LOG_ERROR << "SdFacade: subscribe ack failed: " << exception.what();
     }
 }
 

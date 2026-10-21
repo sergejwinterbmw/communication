@@ -87,6 +87,19 @@ cc_library(
 )
 
 cc_binary(
+    name = "someip_sd_test_provider",
+    srcs = ["client/test_provider.cpp"],
+    features = COMPILER_WARNING_FEATURES,
+    target_compatible_with = _LINUX_OR_QNX,
+    visibility = ["//experimental/someip_sd/test:__pkg__"],
+    deps = [
+        ":sd_client",
+        ":sd_protocol",
+        "//score/mw/com",
+    ],
+)
+
+cc_binary(
     name = "someip_sd_test_client",
     srcs = ["client/test_client.cpp"],
     features = COMPILER_WARNING_FEATURES,

@@ -153,6 +153,11 @@ class SdOnlyRouter final : public lgsomeip::ServiceRouter
     void RunPostedTasks();
 
     void ForwardToEventModule(const event_module_protocol::Message& message);
+    bool MakeRemoteSubscriberMessage(std::uint16_t service_id,
+                                     std::uint16_t instance_id,
+                                     std::uint16_t event_id,
+                                     const std::shared_ptr<lgsomeip::osabstraction::Address>& address,
+                                     event_module_protocol::Message& message);
 
     lgsomeip::ServiceManager* service_manager_{nullptr};
     EventModuleClient* event_module_{nullptr};

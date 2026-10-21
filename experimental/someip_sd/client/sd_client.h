@@ -51,6 +51,9 @@ class SdClient final
     bool ReleaseService(std::uint16_t service, std::uint16_t instance);
     bool Subscribe(std::uint16_t service, std::uint16_t instance, std::uint16_t eventgroup, std::uint8_t major);
     bool Unsubscribe(std::uint16_t service, std::uint16_t instance, std::uint16_t eventgroup);
+    /// The service instance must be configured with is-provider true in the SD daemon's configuration.
+    bool OfferService(std::uint16_t service, std::uint16_t instance, std::uint8_t major, std::uint32_t minor);
+    bool StopOfferService(std::uint16_t service, std::uint16_t instance);
 
   private:
     bool Send(const protocol::Message& message);

@@ -140,6 +140,26 @@ bool SdClient::Unsubscribe(std::uint16_t service, std::uint16_t instance, std::u
     return Send(message);
 }
 
+bool SdClient::OfferService(std::uint16_t service, std::uint16_t instance, std::uint8_t major, std::uint32_t minor)
+{
+    protocol::Message message{};
+    message.opcode = protocol::Opcode::kOfferService;
+    message.service = service;
+    message.instance = instance;
+    message.major = major;
+    message.minor = minor;
+    return Send(message);
+}
+
+bool SdClient::StopOfferService(std::uint16_t service, std::uint16_t instance)
+{
+    protocol::Message message{};
+    message.opcode = protocol::Opcode::kStopOfferService;
+    message.service = service;
+    message.instance = instance;
+    return Send(message);
+}
+
 bool SdClient::Send(const protocol::Message& message)
 {
     if (!connection_)
@@ -177,6 +197,8 @@ void SdClient::OnNotify(score::cpp::span<const std::uint8_t> data)
         case protocol::Opcode::kReleaseService:
         case protocol::Opcode::kSubscribe:
         case protocol::Opcode::kUnsubscribe:
+        case protocol::Opcode::kOfferService:
+        case protocol::Opcode::kStopOfferService:
         default:
             break;
     }

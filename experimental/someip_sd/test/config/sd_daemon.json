@@ -27,6 +27,26 @@
                     "events" : [ "0x8778" ]
                 }
             ]
+        },
+        {
+            "service" : "0x2345",
+            "instance" : "0x0001",
+            "is-provider" : "true",
+            "unreliable" : "30620",
+            "events" :
+            [
+                {
+                    "event" : "0x8001",
+                    "is_field" : "true"
+                }
+            ],
+            "eventgroups" :
+            [
+                {
+                    "eventgroup" : "0x0010",
+                    "events" : [ "0x8001" ]
+                }
+            ]
         }
     ],
     "service-discovery" :

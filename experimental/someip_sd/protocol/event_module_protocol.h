@@ -26,7 +26,7 @@ namespace score::someip_sd::event_module_protocol
 /// Name of the message_passing service offered by the event module.
 inline constexpr const char* kServiceIdentifier = "someip_event_module";
 
-inline constexpr std::uint8_t kVersion = 1U;
+inline constexpr std::uint8_t kVersion = 2U;
 
 /// Routing commands from the SD daemon to the event module (SD daemon -> event module only).
 enum class Opcode : std::uint8_t
@@ -34,10 +34,16 @@ enum class Opcode : std::uint8_t
     /// Remote service instance became available: open local_port, accept data from remote_ip:remote_port,
     /// offer the LoLa service instance with the given events.
     kAddRoute = 0x01U,
+    /// Removes a remote route or a provided service.
     kRemoveRoute = 0x02U,
     /// Subscription acknowledged: forward notifications of event to LoLa.
     kAddSubscription = 0x03U,
     kRemoveSubscription = 0x04U,
+    /// Local application offers the service instance: consume its LoLa events and send them from local_port.
+    kAddProvidedService = 0x05U,
+    /// Remote subscriber remote_ip:remote_port for event of a provided service; repeated on every renewal.
+    kAddRemoteSubscriber = 0x06U,
+    kRemoveRemoteSubscriber = 0x07U,
 };
 
 inline constexpr std::size_t kMaxEvents = 64U;
@@ -51,19 +57,23 @@ struct Message
     std::uint16_t local_port{0U};
     std::uint16_t remote_port{0U};
     std::array<std::uint8_t, 4U> remote_ip{};  ///< IPv4, network byte order
-    std::vector<std::uint16_t> events{};       ///< kAddRoute only
+    std::uint8_t major{0U};                    ///< kAddProvidedService only
+    std::vector<std::uint16_t> events{};       ///< kAddRoute, kAddProvidedService
+    std::vector<std::uint16_t> fields{};       ///< kAddProvidedService: events that are fields
 };
 
 /// Wire layout, little endian:
 /// [0] version, [1] opcode, [2..3] service, [4..5] instance, [6..7] event, [8..9] local port,
-/// [10..11] remote port, [12..15] remote IPv4, [16..17] event count n, [18..18+2n) event ids
-inline constexpr std::size_t kHeaderSize = 18U;
-inline constexpr std::size_t kMaxMessageSize = kHeaderSize + (2U * kMaxEvents);
+/// [10..11] remote port, [12..15] remote IPv4, [16] major, [17] reserved, [18..19] event count n,
+/// [20..21] field count m, then n event ids and m field ids
+inline constexpr std::size_t kHeaderSize = 22U;
+inline constexpr std::size_t kMaxMessageSize = kHeaderSize + (4U * kMaxEvents);
 
 inline std::vector<std::uint8_t> Encode(const Message& message)
 {
     const std::size_t count = (message.events.size() < kMaxEvents) ? message.events.size() : kMaxEvents;
-    std::vector<std::uint8_t> buffer(kHeaderSize + (2U * count), 0U);
+    const std::size_t field_count = (message.fields.size() < kMaxEvents) ? message.fields.size() : kMaxEvents;
+    std::vector<std::uint8_t> buffer(kHeaderSize + (2U * (count + field_count)), 0U);
     const auto put16 = [&buffer](std::size_t pos, std::uint16_t value) {
         buffer[pos] = static_cast<std::uint8_t>(value & 0xFFU);
         buffer[pos + 1U] = static_cast<std::uint8_t>(value >> 8U);
@@ -79,10 +89,16 @@ inline std::vector<std::uint8_t> Encode(const Message& message)
     {
         buffer[12U + index] = message.remote_ip[index];
     }
-    put16(16U, static_cast<std::uint16_t>(count));
+    buffer[16] = message.major;
+    put16(18U, static_cast<std::uint16_t>(count));
+    put16(20U, static_cast<std::uint16_t>(field_count));
     for (std::size_t index = 0U; index < count; ++index)
     {
         put16(kHeaderSize + (2U * index), message.events[index]);
+    }
+    for (std::size_t index = 0U; index < field_count; ++index)
+    {
+        put16(kHeaderSize + (2U * (count + index)), message.fields[index]);
     }
     return buffer;
 }
@@ -96,8 +112,9 @@ inline std::optional<Message> Decode(const std::uint8_t* data, std::size_t size)
     const auto get16 = [data](std::size_t pos) {
         return static_cast<std::uint16_t>(data[pos] | static_cast<std::uint16_t>(data[pos + 1U] << 8U));
     };
-    const std::size_t count = get16(16U);
-    if ((count > kMaxEvents) || (size != (kHeaderSize + (2U * count))))
+    const std::size_t count = get16(18U);
+    const std::size_t field_count = get16(20U);
+    if ((count > kMaxEvents) || (field_count > kMaxEvents) || (size != (kHeaderSize + (2U * (count + field_count)))))
     {
         return std::nullopt;
     }
@@ -112,9 +129,14 @@ inline std::optional<Message> Decode(const std::uint8_t* data, std::size_t size)
     {
         message.remote_ip[index] = data[12U + index];
     }
+    message.major = data[16];
     for (std::size_t index = 0U; index < count; ++index)
     {
         message.events.push_back(get16(kHeaderSize + (2U * index)));
+    }
+    for (std::size_t index = 0U; index < field_count; ++index)
+    {
+        message.fields.push_back(get16(kHeaderSize + (2U * (count + index))));
     }
     return message;
 }
@@ -141,7 +163,8 @@ inline std::string LolaEventName(std::uint16_t event)
     return "event_" + Hex4(event);
 }
 
-/// Sample layout of every forwarded event: payload length followed by the serialized SOME/IP payload.
+/// Sample layout of every event in both directions: payload length followed by the serialized SOME/IP payload.
+/// For provided services (TX) only size and payload are used; the event module creates the SOME/IP header.
 inline constexpr std::size_t kMaxPayloadSize = 1400U;
 struct EventSample
 {

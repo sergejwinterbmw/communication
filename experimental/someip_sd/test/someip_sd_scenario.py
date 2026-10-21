@@ -26,6 +26,11 @@ PEER_DIR = "/opt/someip_sd_peer"
 CLIENT_RUNTIME_SECONDS = 15
 # The client unsubscribes after its runtime and checks for late events (grace 0.5 s + check 3 s).
 CLIENT_TIMEOUT_SECONDS = CLIENT_RUNTIME_SECONDS + 15
+# The provider must outlive the RX check and the peer consumer's subscribe / unsubscribe phase; its StopOffer is
+# checked by the peer consumer at the end.
+PROVIDER_RUNTIME_SECONDS = 45
+PEER_CONSUMER_TIMEOUT_SECONDS = 90
+EVENT_MODULE_LOG = "/tmp/someip_sd_event_module.log"
 
 
 class ConsoleSide:
@@ -65,13 +70,18 @@ def _sh(side, command, timeout=30):
 
 
 def run(sd_side, peer_side):
-    peer_side.start(f"{PEER_DIR}/bin/someipd {PEER_DIR}/etc/lg_peer.json")
+    # Background output must not reach the QNX console, it would interleave with the command parsing of the ITF.
+    peer_side.start(f"{PEER_DIR}/bin/someipd {PEER_DIR}/etc/lg_peer.json > /tmp/someip_sd_someipd.log 2>&1")
     _sh(peer_side, "sleep 1")
-    peer_side.start(f"{PEER_DIR}/bin/someip_sd_peer {PEER_DIR}/etc/lg_peer.json")
-    sd_side.start(f"{SD_DIR}/bin/someip_event_module {SD_DIR}/etc/mw_com_config.json")
+    peer_side.start(f"{PEER_DIR}/bin/someip_sd_peer {PEER_DIR}/etc/lg_peer.json > /tmp/someip_sd_peer.log 2>&1")
+    sd_side.start(f"{SD_DIR}/bin/someip_event_module {SD_DIR}/etc/mw_com_config.json > {EVENT_MODULE_LOG} 2>&1")
     _sh(sd_side, "sleep 1")
-    sd_side.start(f"{SD_DIR}/bin/someip_sd_daemon {SD_DIR}/etc/sd_daemon.json")
+    sd_side.start(f"{SD_DIR}/bin/someip_sd_daemon {SD_DIR}/etc/sd_daemon.json > /tmp/someip_sd_daemon.log 2>&1")
     _sh(sd_side, "sleep 1")
+    sd_side.start(
+        f"{SD_DIR}/bin/someip_sd_test_provider --runtime {PROVIDER_RUNTIME_SECONDS}"
+        f" --mw-com-config {SD_DIR}/etc/mw_com_config.json > /tmp/someip_sd_provider.log 2>&1"
+    )
 
     out = _sh(
         sd_side,
@@ -89,3 +99,28 @@ def run(sd_side, peer_side):
     assert "event: service 0x1234 event 0x8778" in out, "no event received from the peer via LoLa"
     assert "unsubscribed eventgroup 0x4465" in out, "test client did not unsubscribe"
     assert "result: OK, no events after unsubscribe" in out, "events still received after unsubscribe"
+
+    # TX: the peer consumer subscribes the service offered by the test provider via the SD daemon; the event module
+    # sends the provider's LoLa samples as SOME/IP notifications.
+    peer_out = _sh(
+        peer_side,
+        f"timeout -s TERM {PEER_CONSUMER_TIMEOUT_SECONDS} {PEER_DIR}/bin/someip_sd_peer_consumer"
+        f" {PEER_DIR}/etc/lg_peer.json",
+        timeout=PEER_CONSUMER_TIMEOUT_SECONDS + 30,
+    )
+    _sh(sd_side, "sleep 1")
+    module_log = _sh(sd_side, f"cat {EVENT_MODULE_LOG}")
+    print(f"\n[peer consumer]\n{peer_out}\n[event module]\n{module_log}")
+
+    assert "service 0x2345.0x0001 available" in peer_out, "provided service not discovered by the peer"
+    assert "received 5 event(s)" in peer_out, "no notifications from the event module"
+    assert "no events after unsubscribe" in peer_out, "notifications still sent after unsubscribe"
+    assert "service not available after stop offer" in peer_out, "StopOffer of the provider not seen"
+    assert "result: OK" in peer_out, "peer consumer failed"
+    assert "sent initial field value of event 0x8001" in module_log, "no initial field value for the new subscriber"
+    if "stopped providing 0x2345.0x0001" not in module_log:
+        daemon_log = _sh(sd_side, "cat /tmp/someip_sd_daemon.log")
+        raise AssertionError(
+            f"event module still provides the service after the StopOffer\n[event module]\n{module_log}\n"
+            f"[SD daemon]\n{daemon_log}"
+        )

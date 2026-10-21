@@ -63,6 +63,8 @@ class SdFacade final
     {
         std::set<ServiceKey> available;
         std::vector<Subscription> subscriptions;
+        /// Offered service instances with their (major, minor) version, needed again for StopOffer.
+        std::map<ServiceKey, std::pair<std::uint8_t, std::uint32_t>> offered;
     };
 
     // multiplexer thread
@@ -71,6 +73,16 @@ class SdFacade final
     void HandleClientDisconnect(std::uint16_t client_id);
     void SendFindService(std::uint16_t client_id, const protocol::Message& message, std::uint32_t ttl);
     void SendSubscribe(std::uint16_t client_id, const Subscription& subscription, std::uint32_t ttl);
+    void SendOfferService(std::uint16_t client_id,
+                          const ServiceKey& key,
+                          std::uint8_t major,
+                          std::uint32_t minor,
+                          std::uint32_t ttl);
+    void SendSubscribeAck(std::uint16_t client_id,
+                          const ServiceKey& key,
+                          std::uint16_t eventgroup,
+                          std::uint8_t major,
+                          std::uint32_t ttl);
 
     // any thread
     void Notify(std::uint16_t client_id, const protocol::Message& message);

@@ -17,20 +17,31 @@ load("//quality/integration_testing:integration_testing.bzl", "dual_qemu_integra
 load("//score/mw:common_features.bzl", "COMPILER_WARNING_FEATURES")
 load("//score/mw/com/test:pkg_application.bzl", "pkg_application")
 
-# Integration tests: the SD side (10.0.3.1, event module + SD daemon + test client) and the peer side (10.0.3.2,
-# lg-someip someipd + provider) run the same scenario (someip_sd_scenario.py) on two QNX QEMU VMs or two Linux Docker
-# containers.
+# Integration tests: the SD side (10.0.3.1, event module + SD daemon + test client / test provider) and the peer side
+# (10.0.3.2, lg-someip someipd + provider / consumer) run the same scenario (someip_sd_scenario.py) on two QNX QEMU VMs
+# or two Linux Docker containers.
+
+_LINUX_OR_QNX = select({
+    "@platforms//os:linux": [],
+    "@platforms//os:qnx": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
 
 # Remote provider on the upstream lg-someip stack; needs @lg_someip//:someipd running alongside.
 cc_binary(
     name = "someip_sd_peer",
     srcs = ["peer/peer_provider.cpp"],
     features = COMPILER_WARNING_FEATURES,
-    target_compatible_with = select({
-        "@platforms//os:linux": [],
-        "@platforms//os:qnx": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
+    target_compatible_with = _LINUX_OR_QNX,
+    deps = ["@lg_someip//:lgsomeip"],
+)
+
+# Remote consumer of someip_sd_test_provider on the upstream lg-someip stack; needs @lg_someip//:someipd alongside.
+cc_binary(
+    name = "someip_sd_peer_consumer",
+    srcs = ["peer/peer_consumer.cpp"],
+    features = COMPILER_WARNING_FEATURES,
+    target_compatible_with = _LINUX_OR_QNX,
     deps = ["@lg_someip//:lgsomeip"],
 )
 
@@ -41,6 +52,7 @@ pkg_application(
         "//experimental/someip_sd:someip_event_module",
         "//experimental/someip_sd:someip_sd_daemon",
         "//experimental/someip_sd:someip_sd_test_client",
+        "//experimental/someip_sd:someip_sd_test_provider",
     ],
     etc = [
         "config/logging.json",
@@ -54,6 +66,7 @@ pkg_application(
     app_name = "someip_sd_peer",
     bin = [
         ":someip_sd_peer",
+        ":someip_sd_peer_consumer",
         "@lg_someip//:someipd",
     ],
     etc = ["config/lg_peer.json"],
@@ -81,6 +94,7 @@ dual_qemu_integration_test(
 # Both containers use the same image; the test starts the peer container itself.
 integration_test(
     name = "someip_sd_docker_test",
+    timeout = "moderate",
     srcs = [
         "someip_sd_scenario.py",
         "test_someip_sd_docker.py",

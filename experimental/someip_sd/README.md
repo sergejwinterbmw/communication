@@ -21,11 +21,13 @@ exposed to local clients via `score::message_passing`. Not part of the product.
 | Target | Description |
 | --- | --- |
 | `:someip_sd_daemon` | SD-only daemon (lg-someip `ServiceManager` with an injected `SdOnlyRouter`) |
-| `:someip_event_module` | User-space stand-in for the io-sock event module: SOME/IP notifications (UDP) to LoLa events |
+| `:someip_event_module` | User-space stand-in for the io-sock event module: SOME/IP notifications (UDP) to LoLa events and back |
 | `:sd_client` | Client library for the daemon protocol (`protocol/sd_protocol.h`) |
 | `:someip_sd_test_client` | Requests a service, subscribes an eventgroup and prints the events received via LoLa |
+| `:someip_sd_test_provider` | Offers `0x2345/0x0001` via the SD daemon and publishes event `0x8001` as LoLa samples |
 | `test:someip_sd_peer` | Remote provider on the upstream lg-someip stack, offers `0x1234/0x5678` continuously |
-| `@lg_someip//:someipd` | Upstream lg-someip routing daemon, required by `test:someip_sd_peer` |
+| `test:someip_sd_peer_consumer` | Remote consumer on the upstream lg-someip stack, subscribes `0x2345/0x0001` |
+| `@lg_someip//:someipd` | Upstream lg-someip routing daemon, required by the `test:someip_sd_peer*` applications |
 | `test:someip_sd_dual_qemu_test` | Integration test on two QNX QEMU VMs (see below) |
 | `test:someip_sd_docker_test` | Same integration test on two Linux Docker containers |
 | `iosock_poc:iosock_poc_test` | QNX only: LoLa and `score::message_passing` inside an io-sock module (see below) |
@@ -33,33 +35,39 @@ exposed to local clients via `score::message_passing`. Not part of the product.
 ## Prototyp target architecture overview
 ![Architecture diagram](doc/prototype.svg)
 
-## Architecture (stage 2)
+## Architecture (stage 3)
 
 ```mermaid
 flowchart LR
     subgraph SD["SD side (10.0.3.1)"]
         client["someip_sd_test_client<br/>(sd_client + GenericProxy)"]
+        provider["someip_sd_test_provider<br/>(sd_client + GenericSkeleton)"]
         subgraph daemon["someip_sd_daemon"]
             facade["SdFacade<br/>message_passing server"]
             sm["lg-someip ServiceManager<br/>(SD state machine)"]
             router["SdOnlyRouter<br/>multiplexer thread, timers,<br/>SD UDP endpoints"]
         end
-        module["someip_event_module<br/>UDP 30600,<br/>GenericSkeleton per service instance"]
+        module["someip_event_module<br/>RX: UDP 30600, GenericSkeleton<br/>TX: GenericProxy, UDP 30620"]
     end
 
     subgraph Peer["Peer side (10.0.3.2), lg-someip stack"]
         someipd["someipd<br/>ServiceManager + PacketRouterHost"]
         peer["someip_sd_peer<br/>offers 0x1234.0x5678,<br/>notifies 0x8778"]
+        peer_consumer["someip_sd_peer_consumer<br/>subscribes 0x2345.0x0001"]
     end
 
     client -- "score::message_passing<br/>Register, RequestService, Subscribe /<br/>Availability, SubscriptionState" --> facade
+    provider -- "score::message_passing<br/>OfferService, StopOfferService" --> facade
     facade -- "internal SD messages<br/>(Post to multiplexer thread)" --> sm
     sm -- "ServiceRouter API" --> router
-    router -- "score::message_passing<br/>AddRoute, AddSubscription, Remove*" --> module
+    router -- "score::message_passing<br/>AddRoute, AddSubscription,<br/>AddProvidedService, AddRemoteSubscriber, Remove*" --> module
     router -- "SOME/IP-SD, UDP 30491<br/>multicast 224.244.224.245 + unicast" --- someipd
     peer -- "local IPC<br/>(QNX message passing / Unix sockets)" --- someipd
+    peer_consumer -- "local IPC" --- someipd
     someipd -- "SOME/IP events 0x8778<br/>UDP 30509 to 30600" --> module
     module -- "LoLa someip/1234/5678<br/>event_8778" --> client
+    provider -- "LoLa someip/2345/0001<br/>event_8001" --> module
+    module -- "SOME/IP events 0x8001<br/>UDP 30620 to 30630" --> someipd
 ```
 
 - The daemon only does service discovery. `ServiceManager` runs unchanged; `SdOnlyRouter` replaces lg-someip's
@@ -74,14 +82,30 @@ flowchart LR
     remote UDP endpoint and the events of the service from the lg-someip configuration.
   - `add_subscribe_route` / `remove_subscribe_route` for local clients (SubscribeAck received) become
     `AddSubscription` / `RemoveSubscription` per event.
+  - `add_route` for an offer of a local client (`app_id` != 0) becomes `AddProvidedService` with the configured
+    UDP port, the major version and the events (fields marked) from the lg-someip configuration;
+    `remove_route` (StopOffer, also sent by `SdFacade` when a provider disconnects) removes it again.
+  - `add_subscribe_route` / `remove_subscribe_route` for remote subscribers (`app_id` 0, IPv4 UDP endpoint) become
+    `AddRemoteSubscriber` / `RemoveRemoteSubscriber` per event. lg-someip repeats `add_subscribe_route` on every
+    renewal; the event module ignores known subscribers.
+- Remote Subscribe of a provided service: the `ServiceManager` forwards it as internal Subscribe to the providing
+  client; `SdFacade` acknowledges it on the client's behalf (internal SubscribeAck), only then the `ServiceManager`
+  sends the SubscribeAck and calls `add_subscribe_route`.
 - The event module offers one LoLa `GenericSkeleton` per SOME/IP service instance (`someip/<service>/<instance>`)
   with one event per SOME/IP event (`event_<event id>`) while the remote service is available, and forwards
   subscribed notifications. A sample (`EventSample`) carries the serialized payload with its length, session,
   interface version and message type; the payload is copied once from the socket into the LoLa slot.
 - The LoLa deployment ([test/config/mw_com_config.json](test/config/mw_com_config.json)) must list every
   service instance and event the event module offers; it is shared by the event module and the consumers.
+- TX: for a provided service the event module creates a `GenericProxy` on the provider's LoLa skeleton (same naming,
+  same `EventSample` layout, only size and payload used) as soon as it is found, and sends each sample as SOME/IP
+  notification (session per event, interface version = configured major) to all remote subscribers via
+  `sendmsg` with the header and the payload taken directly from the LoLa slot. A receive handler wakes the receive
+  loop. For fields the latest sample is held and sent to every new subscriber. Held samples are released and the
+  events unsubscribed before the proxy is destroyed, otherwise LoLa terminates the process.
 - Limitations: UDP and IPv4 only, no SOME/IP-TP, no multicast eventgroups, payload up to 1400 bytes, no resync
-  after an event module restart (restart the SD daemon as well), skeletons are never recreated.
+  after an event module restart (restart the SD daemon as well), skeletons are never recreated, remote subscriptions
+  are acknowledged without asking the providing application, no methods.
 
 ### Daemon internals
 
@@ -99,17 +123,17 @@ flowchart LR
     net(["Network<br/>SD UDP 30491"])
     module(["someip_event_module<br/>(score::message_passing)"])
 
-    client -- "Register / RequestService / Subscribe ..." --> facade
+    client -- "Register / RequestService / Subscribe / OfferService ..." --> facade
     facade -- "Availability / SubscriptionState (Notify)" --> client
 
     facade -- "Post(task): work runs on the multiplexer thread" --> router
-    facade -- "on_internal_message(MessageSD)<br/>FindService / Subscribe, TTL 0 = release / unsubscribe<br/>on_disconnected_application(client_id)" --> sm
+    facade -- "on_internal_message(MessageSD)<br/>FindService / Subscribe / OfferService / SubscribeAck,<br/>TTL 0 = release / unsubscribe / stop offer<br/>on_disconnected_application(client_id)" --> sm
 
-    router -- "SetInternalMessageHandler callback<br/>(client_id, SD bytes: Offer / SubscribeAck)" --> facade
+    router -- "SetInternalMessageHandler callback<br/>(client_id, SD bytes: Offer / SubscribeAck / Subscribe)" --> facade
 
     router -- "on_external_message(endpoint, MessageSD, reboot)" --> sm
     sm -- "ServiceRouter API (see table)" --> router
-    router -- "EventModuleClient<br/>AddRoute / AddSubscription / Remove*" --> module
+    router -- "EventModuleClient<br/>AddRoute / AddSubscription /<br/>AddProvidedService / AddRemoteSubscriber / Remove*" --> module
 
     router <-- "SD multicast + unicast" --> net
 ```
@@ -123,9 +147,9 @@ flowchart LR
 | Timers (QNX) | `message_passing_set_timer`, `message_passing_kill_timer` | One thread per timer; the handler runs on the multiplexer thread via `Post` |
 | SD output | `send_external_sd_message` | Sends via the unicast endpoint (to the target address or the multicast group) |
 | | `send_internal_message` | Passed to the `InternalMessageHandler`, i.e. to `SdFacade` |
-| Data routing | `add_route`, `remove_route` | Forwarded to the event module as `AddRoute` / `RemoveRoute` (IPv4 UDP endpoint, local port, configured events) |
+| Data routing | `add_route`, `remove_route` | Remote offer (`app_id` 0): `AddRoute` / `RemoveRoute` (IPv4 UDP endpoint, local port, configured events); own offer: `AddProvidedService` / `RemoveRoute` |
 | | `find_connection` | Always returns 1 (no TCP yet) |
-| | `add_subscribe_route`, `remove_subscribe_route` | For local clients forwarded as `AddSubscription` / `RemoveSubscription` per event; remote and multicast routes are only logged |
+| | `add_subscribe_route`, `remove_subscribe_route` | Local client: `AddSubscription` / `RemoveSubscription`; remote subscriber: `AddRemoteSubscriber` / `RemoveRemoteSubscriber` per event; multicast routes are only logged |
 | Other | `set_instance_id`, `check_and_send_magic_cookies`, `reboot_route` | No-op / logged |
 
 Calls into `ServiceManager`:
@@ -153,10 +177,16 @@ bazel test --config=qnx_x86_64 //experimental/someip_sd/test:someip_sd_dual_qemu
 ```
 
 Both run the scenario in [test/someip_sd_scenario.py](test/someip_sd_scenario.py) with the configs in
-[test/config](test/config): the SD side (10.0.3.1) runs `someip_event_module`, `someip_sd_daemon` and the test client,
-the peer side (10.0.3.2) runs `someipd` and `someip_sd_peer`. The test checks availability, subscription
-acknowledgement, the LoLa offer of the event module, the events received via LoLa and that no events arrive after the
-client unsubscribed (`--runtime`).
+[test/config](test/config): the SD side (10.0.3.1) runs `someip_event_module`, `someip_sd_daemon`, the test client and
+the test provider, the peer side (10.0.3.2) runs `someipd`, `someip_sd_peer` and `someip_sd_peer_consumer`.
+
+- RX: availability, subscription acknowledgement, the LoLa offer of the event module, the events received via LoLa
+  and that no events arrive after the client unsubscribed (`--runtime`).
+- TX: the peer consumer discovers the provided service, receives 5 notifications with increasing counters (the first
+  one is the initial field value), receives nothing after its unsubscribe while the provider keeps publishing, and
+  sees the StopOffer when the provider ends; the event module removes the provided service afterwards.
+- Background processes write to `/tmp/someip_sd_*.log`; on the QNX serial console their output would interleave
+  with the command parsing of the ITF.
 
 - QNX: `dual_qemu` environment with the inter-VM network. Requires the QNX toolchain setup described in the root
   `.bazelrc`.
@@ -225,7 +255,7 @@ implements the corresponding timer callbacks.
 
 | Target | Used by |
 | --- | --- |
-| `@lg_someip//:lgsomeip` | `someip_sd_peer` |
+| `@lg_someip//:lgsomeip` | `someip_sd_peer`, `someip_sd_peer_consumer` |
 | `@lg_someip//:daemon_core` (`ServiceManager`, `PacketRouterHost`) | `someip_sd_daemon` (injects `SdOnlyRouter`), `someipd` |
 
 `0001-fix-subscribe-ack-multicast-reset.patch` fixes a no-op `multicast == nullptr` in `ServiceManager`, so a

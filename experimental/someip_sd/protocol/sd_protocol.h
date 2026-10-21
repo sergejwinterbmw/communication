@@ -36,6 +36,8 @@ enum class Opcode : std::uint8_t
     kReleaseService = 0x03U,
     kSubscribe = 0x04U,
     kUnsubscribe = 0x05U,
+    kOfferService = 0x06U,
+    kStopOfferService = 0x07U,
     // daemon -> client (Notify)
     kAvailability = 0x81U,       ///< flag: 1 = available, 0 = not available
     kSubscriptionState = 0x82U,  ///< flag: 1 = acknowledged, 0 = not acknowledged / lost

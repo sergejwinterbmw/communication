@@ -18,6 +18,25 @@
           ]
         }
       ]
+    },
+    {
+      "serviceTypeName": "/someip/2345",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "bindings": [
+        {
+          "binding": "SHM",
+          "serviceId": 9029,
+          "events": [
+            {
+              "eventName": "event_8001",
+              "eventId": 1
+            }
+          ]
+        }
+      ]
     }
   ],
   "serviceInstances": [
@@ -36,6 +55,28 @@
           "events": [
             {
               "eventName": "event_8778",
+              "numberOfSampleSlots": 10,
+              "maxSubscribers": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "someip/2345/0001",
+      "serviceTypeName": "/someip/2345",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "instances": [
+        {
+          "instanceId": 1,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "event_8001",
               "numberOfSampleSlots": 10,
               "maxSubscribers": 3
             }
